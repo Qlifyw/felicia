@@ -2,7 +2,22 @@ import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
 
 plugins {
     kotlin("jvm") version "1.3.50"
-//    kotlin("plugin.spring") version "1.3.50"
+    application
+    id("com.github.johnrengelman.shadow") version "5.0.0"
+}
+
+application {
+    mainClassName = "com.procurement.felicia.infrastructure.web.controllers.SubscriptionControllerKt"
+}
+
+tasks.withType<Jar> {
+    manifest {
+        attributes(
+                mapOf(
+                        "Main-Class" to application.mainClassName
+                )
+        )
+    }
 }
 
 group = "com.procurement"
@@ -12,12 +27,6 @@ java.sourceCompatibility = JavaVersion.VERSION_1_8
 repositories {
     mavenCentral()
     jcenter()
-}
-
-tasks.jar {
-    manifest {
-        attributes["Main-Class"] = "com.procurement.felicia.infrastructure.web.controllers.SubscriptionControllerKt"
-    }
 }
 
 dependencies {
