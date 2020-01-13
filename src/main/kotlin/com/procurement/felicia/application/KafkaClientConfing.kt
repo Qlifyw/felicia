@@ -10,11 +10,11 @@ import org.apache.kafka.common.serialization.StringDeserializer
 import org.apache.kafka.common.serialization.StringSerializer
 import java.util.*
 
-fun createKafkaConsumer(host: String, authCredentials: KafkaAuthCredentials): KafkaConsumer<String, String> {
+fun createKafkaConsumer(host: String, authCredentials: KafkaAuthCredentials, groupId: String): KafkaConsumer<String, String> {
 
     val props = Properties()
     props[ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG] = host
-    props[ConsumerConfig.GROUP_ID_CONFIG] = UUID.randomUUID().toString()
+    props[ConsumerConfig.GROUP_ID_CONFIG] = groupId
     props[ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG] = StringDeserializer::class.java
     props[ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG] = StringDeserializer::class.java
     props[ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG] = false

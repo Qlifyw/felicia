@@ -29,7 +29,7 @@ fun startListen(topics: Set<String>, user: User, clients: MutableMap<UUID, Clien
                 is AuthorizedUser -> KafkaAuthCredentials.SaslAuth(user.login, user.password)
                 is NonAuthorizedUser -> KafkaAuthCredentials.NONE()
             }
-            createKafkaConsumer(host, authCredentials)
+            createKafkaConsumer(host, authCredentials, user.groupId)
                 .apply {
                     println("AAAA   ${Thread.currentThread().name}")
                     val assignments = topics.asSequence()
