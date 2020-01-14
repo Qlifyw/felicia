@@ -7,7 +7,9 @@ import com.procurement.felicia.application.consume
 import com.procurement.felicia.application.startListen
 import io.ktor.application.call
 import io.ktor.application.install
+import io.ktor.content.TextContent
 import io.ktor.features.StatusPages
+import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
 import io.ktor.request.receiveText
 import io.ktor.response.respond
@@ -88,7 +90,13 @@ fun main() {
 
                 val deffer = consume(client.source, content, topic, CompletableDeferred())
                 val message = deffer.await()
-                call.respond(message = message, status = HttpStatusCode.OK)
+                call.respond(
+                    TextContent(
+                        text = message,
+                        status = HttpStatusCode.OK,
+                        contentType = ContentType.Application.Json
+                    )
+                )
             }
         }
     }.start(wait = true)
