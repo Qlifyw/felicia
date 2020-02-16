@@ -17,11 +17,7 @@ import io.ktor.routing.post
 import io.ktor.routing.routing
 import io.ktor.server.engine.embeddedServer
 import io.ktor.server.netty.Netty
-import io.ktor.sessions.Sessions
-import io.ktor.sessions.cookie
-import io.ktor.sessions.get
-import io.ktor.sessions.sessions
-import io.ktor.sessions.set
+import io.ktor.sessions.*
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.io.errors.IOException
 import java.util.*
@@ -72,9 +68,15 @@ fun main() {
             }
 
             post("/kafka/find") {
-                val payloadNode = objectMapper.readTree(call.receiveText())
-                val content = payloadNode.get("pattern").asText()
-                val topic = payloadNode.get("topic").asText()
+
+                val content = call.request.headers["pattern"] ?: return@post call.respond(
+                        status = HttpStatusCode.BadRequest,
+                        message = "Could not find paramenter 'pattern' in headers to connect"
+                )
+                val topic = call.request.headers["topic"] ?: return@post call.respond(
+                        status = HttpStatusCode.BadRequest,
+                        message = "Could not find paramenter 'topic' in headers to connect"
+                )
 
                 val session: IdentSession = call.sessions.get<IdentSession>()!!
                 println("session: ${session}")
