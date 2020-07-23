@@ -1,135 +1,167 @@
 package com.procurement.felicia.application
 
-import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.Deferred
-import kotlinx.coroutines.GlobalScope
-import kotlinx.coroutines.async
-import org.apache.kafka.clients.consumer.KafkaConsumer
-import org.apache.kafka.clients.consumer.OffsetAndMetadata
+import com.procurement.felicia.application.network.model.Socket
+import com.procurement.felicia.domain.KafkaError
+import com.procurement.felicia.domain.Option
+import com.procurement.felicia.domain.Result
+import com.procurement.felicia.domain.Result.Companion.failure
+import com.procurement.felicia.domain.Result.Companion.success
+import com.procurement.felicia.domain.asSuccess
+import com.procurement.felicia.domain.errors.ConsumerConflict
+import com.procurement.felicia.domain.model.*
+import com.procurement.felicia.infrastructure.kafka.KafkaAuthCredentials
+import com.procurement.felicia.infrastructure.kafka.createKafkaConsumer
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.withTimeout
+import org.apache.kafka.clients.consumer.*
 import org.apache.kafka.common.TopicPartition
 import java.security.MessageDigest
 import java.time.Duration
-import java.util.*
+import java.time.LocalDateTime
 
+fun startListen(action: Action, topics: Set<String>, user: User, hosts: List<Socket>): Result<Client, KafkaError> {
 
-/**
- * - Get message from topic that user don't observe
- *
- *      ** TODO **
- *      * https://medium.com/@werneckpaiva/how-to-seek-kafka-consumer-offsets-by-timestamp-de351ba35c61
- *
- */
+    val authCredentials = getAuthCredentials(user)
+    val consumerFactory = MessageConsumerFactory(hosts, authCredentials, user.groupId)
+    val client = when (action) {
+        is NewClient -> assign(topics, consumerFactory)
+        is Reassign  -> reassign(topics, consumerFactory, action.client)
+    }
+        .orForwardFail { fail -> return fail }
 
+    return success(client)
+}
 
-fun startListen(topics: Set<String>, user: User, clients: MutableMap<UUID, Client>, host: String) {
-    val action = ackAction(clients, user)
-    when (action) {
-        is NewClient -> {
-            val authCredentials = when (user) {
-                is AuthorizedUser -> KafkaAuthCredentials.SaslAuth(user.login, user.password)
-                is NonAuthorizedUser -> KafkaAuthCredentials.NONE()
+private fun assign(topics: Iterable<String>, consumerFactory: MessageConsumerFactory): Result<Client, ConsumerConflict> {
+    val checkin = topics
+        .map { topic ->
+            val consumer = consumerFactory.create()
+            checkin(topic, consumer).orForwardFail { error -> return error }
+        }
+        .toMap()
+
+    return success(Client(checkin))
+}
+
+private fun reassign(topics: Iterable<String>, consumerFactory: MessageConsumerFactory, client: Client): Result<Client, ConsumerConflict> {
+    val oldTopics = client.topics
+    val updatedTopics = (topics + oldTopics).toSet()
+
+    val newSubscriptions = updatedTopics
+        .map { topic ->
+            val consumer = consumerFactory.create()
+            checkin(topic, consumer).orForwardFail { error -> return error }
+        }.toMap()
+
+    return client
+        .apply { addSubscriptions(newSubscriptions) }
+        .asSuccess()
+}
+
+class MessageConsumerFactory(
+    val hosts: List<Socket>,
+    val authCredentials: KafkaAuthCredentials,
+    val groupId: String) {
+    fun create(): KafkaConsumer<String, String> = createKafkaConsumer(hosts, authCredentials, groupId)
+}
+
+private fun checkin(topic: String, consumer: KafkaConsumer<String, String>): Result<Pair<String, KafkaConsumer<String, String>>, ConsumerConflict> {
+
+    val assignments = consumer.prepareAssignments(topic)
+    consumer.assign(assignments)
+    val offsets = consumer.getOffsets(assignments)
+    consumer.tryCommit(offsets)
+        .orForwardFail { error -> return error }
+
+    return success(topic to consumer)
+}
+
+private fun getAuthCredentials(user: User) =
+    when (user) {
+        is AuthorizedUser    -> KafkaAuthCredentials.SaslAuth(user.login, user.password)
+        is NonAuthorizedUser -> KafkaAuthCredentials.NONE
+    }
+
+fun KafkaConsumer<*, *>.prepareAssignments(topic: String): List<TopicPartition> =
+    this.partitionsFor(topic)
+        .map { TopicPartition(it.topic(), it.partition()) }
+
+fun KafkaConsumer<*, *>.getOffsets(assignments: List<TopicPartition>): Map<TopicPartition, OffsetAndMetadata> =
+    assignments
+        .map { topicPartition -> topicPartition to OffsetAndMetadata(this.position(topicPartition)) }
+        .toMap()
+
+suspend fun consume(timeout: Duration, consumer: KafkaConsumer<String, String>, content: String, topic: String): Option<String> =
+    withTimeout(timeout.toMillis()) {
+        val assignments = consumer.prepareAssignments(topic)
+        val offsets = consumer.getOffsets(assignments)
+
+        while (isActive) {
+            val records = consumer.poll(Duration.ofMillis(500))
+            println("await ${LocalDateTime.now()}, ${isActive}")
+            if (!records.isEmpty) {
+                println("polled: ${records.count()}")
+                val searchResult = records.findFor(content)
+                when (searchResult) {
+                    is Option.Some -> {
+                        consumer.shiftOffsets(searchResult.value)
+                        return@withTimeout Option.Some(searchResult.value.value())
+                    }
+                    is Option.None -> Unit
+                }
             }
-            createKafkaConsumer(host, authCredentials)
-                .apply {
-                    println("AAAA   ${Thread.currentThread().name}")
-                    val assignments = topics.asSequence()
-                        .flatMap { topic -> this.partitionsFor(topic).asSequence() }
-                        .map { it.topic() to it.partition() }
-                        .map { TopicPartition(it.first, it.second) }
-                        .toList()
-
-                    this.assign(assignments)
-
-                    val commitData = assignments.map { topicPartition ->
-                        topicPartition to OffsetAndMetadata(this.position(topicPartition))
-                    }.toMap()
-                    this.commitSync(commitData)
-                }
-                .also { consumer ->
-                    val client = Client(topics, consumer)
-                    clients.put(user.uid, client)
-                }
         }
+        consumer.seekToStartPoint(offsets)
+        Option.None
+    }
 
-        is Reassign  -> {
-            val oldTopics = action.client.topics
-            val updatedTopics = (topics + oldTopics).toSet()
-            val consumer = action.client.source
-            val assignments = updatedTopics.asSequence()
-                .flatMap { topic -> consumer.partitionsFor(topic).asSequence() }
-                .map { it.topic() to it.partition() }
-                .map { TopicPartition(it.first, it.second) }
-                .toList()
-            consumer.assign(assignments)
+fun ConsumerRecords<*, String>.findFor(content: String): Option<ConsumerRecord<*, String>> {
+    this.forEach { record ->
+        println("${record.value()} | ${this}")
+        if (record.value().contains(content)) {
+            println("record offset: ${record.offset()}")
+            return Option.Some(record)
         }
+    }
+    return Option.None
+}
+
+fun KafkaConsumer<*, String>.shiftOffsets(breakpoint: ConsumerRecord<*, String>) {
+    val consumer = this
+    val recordTopicPartition = TopicPartition(breakpoint.topic(), breakpoint.partition())
+    val recordCommitData = mapOf(
+        recordTopicPartition to OffsetAndMetadata(breakpoint.offset())
+    )
+    consumer.commitSync(recordCommitData)
+    consumer.seek(recordTopicPartition, breakpoint.offset() + 1)
+
+    breakpoint.topic()
+        .let { topic -> consumer.partitionsFor(topic).asSequence() }
+        .filter { partitionInfo -> partitionInfo.partition() != breakpoint.partition() }
+        .map { partitionInfo -> TopicPartition(partitionInfo.topic(), partitionInfo.partition()) }
+
+        .map { topicPartition -> topicPartition to breakpoint.timestamp() }
+        .toMap()
+        .let { consumer.offsetsForTimes(it) }
+        .filter { (_, offsetData) -> offsetData != null }
+        .map { offsetData -> offsetData.key to OffsetAndMetadata(offsetData.value.offset() - 1) }
+        .toMap()
+        .apply { consumer.commitSync(this) }
+        .forEach { (topicData, offsetData) -> consumer.seek(topicData, offsetData.offset() + 1) }
+}
+
+
+fun KafkaConsumer<*, String>.seekToStartPoint(offsets: Map<TopicPartition, OffsetAndMetadata>) {
+    val consumer = this
+    offsets.forEach { partition, offset ->
+        consumer.seek(partition, offset)
     }
 }
 
-fun consume(
-    consumer: KafkaConsumer<String, String>,
-    content: String,
-    targetTopic: String,
-    shutdown: CompletableDeferred<Boolean>
-): Deferred<String> =
-    GlobalScope.async<String> {
-        while (!shutdown.isCompleted) {
-            val records = consumer.poll(Duration.ofMillis(500))
-            if (!records.isEmpty) {
-                println("polled: ${records.count()}")
-                records.forEach { record ->
-                    println("${record.value()} | ${this}")
-                    if (record.value().contains(content)) {
-                        println("record offset: ${record.offset()}")
-
-                        // TODO save partition local. Don't make expensive i/o call
-                        val otherPartitions = targetTopic
-                            .let { topic -> consumer.partitionsFor(topic).asSequence() }
-                            .filter { it.partition() != record.partition() }
-                            .map { it.topic() to it.partition() }
-                            .map { TopicPartition(it.first, it.second) }
-                            .toList()
-
-                        val recordCommitData = mapOf(
-                            TopicPartition(
-                                targetTopic,
-                                record.partition()
-                            ) to OffsetAndMetadata(record.offset())
-                        )
-                        consumer.commitSync(recordCommitData)
-                        consumer.seek(TopicPartition(targetTopic, record.partition()), record.offset() + 1)
-
-                        val offsetsData = consumer.offsetsForTimes(otherPartitions.map { it to record.timestamp() }.toMap())
-                        val commitData = offsetsData
-                            .filter { it.value != null }
-                            .map { offsetData -> offsetData.key to OffsetAndMetadata(offsetData.value.offset() - 1) }
-                            .toMap()
-
-                        consumer.commitSync(commitData)
-                        commitData.forEach {
-                            consumer.seek(it.key, it.value.offset() + 1)
-                        }
-
-                        return@async record.value()
-                    }
-                }
-                consumer.commitSync()
-            }
-        }
-        throw RuntimeException()
-    }
-
-data class Client(
-    val topics: Set<String>,
-    val source: KafkaConsumer<String, String>
-)
-
-sealed class Action
-class NewClient : Action()
-data class Reassign(val client: Client) : Action()
-
-fun ackAction(clients: MutableMap<UUID, Client>, user: User): Action {
-    val client = clients[user.uid]
-    return if (client == null) NewClient() else Reassign(client)
+private fun KafkaConsumer<*, *>.tryCommit(offsets: Map<TopicPartition, OffsetAndMetadata>): Result<Unit, ConsumerConflict> = try {
+    success(this.commitSync(offsets))
+} catch (exception: CommitFailedException) {
+    failure(ConsumerConflict())
 }
 
 fun String.asSHA256(): String {
