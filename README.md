@@ -77,11 +77,3 @@ curl --location --request POST 'http://host:port//kafka/find?pattern=id' \
 --data-raw ''
 ```
 
-## Contributors
-
-<table>
-  <tr>
-    <td align="center"><a href="https://github.com/Qlifyw"><img src="https://avatars0.githubusercontent.com/u/22730194?s=460&u=f44ef45a95e557c3c8bede335873860096181ca1&v=4" width="100px;" alt=""/><br /><sub><b>qlifyw</b></sub></a><br /><a href="#" title="Code">💻</a><a href="#" title="Maintenance">🚧</a></td>
-    <td align="center"><a href="https://github.com/unwnu"><img src="https://avatars0.githubusercontent.com/u/52795077?s=400&u=c952b778f671b0e116be426d6c3e54a21d2955b6&v=4" width="100px;" alt=""/><br /><sub><b>unwnu</b></sub></a><br /><a href="#" title="Documentation">📖</a> <a href="#" title="Ideas, Planning, & Feedback">🤔</a> <a href="#" title="Testing">🔧</a></td>
-  </tr>
-</table>
