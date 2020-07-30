@@ -55,7 +55,6 @@ suspend fun subscribe(call: ApplicationCall, clients: MutableMap<UUID, Client>):
 
 suspend fun find(call: ApplicationCall, clients: MutableMap<UUID, Client>): Response {
     val session: IdentSession? = call.sessions.get<IdentSession>()
-    println("session: ${session}")
 
     val client = clients[session?.uid]
         ?: return Response(status = HttpStatusCode.BadRequest, message = CLIENT_NOT_FOUND)

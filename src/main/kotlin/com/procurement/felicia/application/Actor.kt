@@ -8,16 +8,24 @@ import com.procurement.felicia.domain.Result.Companion.failure
 import com.procurement.felicia.domain.Result.Companion.success
 import com.procurement.felicia.domain.asSuccess
 import com.procurement.felicia.domain.errors.ConsumerConflict
-import com.procurement.felicia.domain.model.*
+import com.procurement.felicia.domain.model.Action
+import com.procurement.felicia.domain.model.AuthorizedUser
+import com.procurement.felicia.domain.model.Client
+import com.procurement.felicia.domain.model.NewClient
+import com.procurement.felicia.domain.model.NonAuthorizedUser
+import com.procurement.felicia.domain.model.Reassign
+import com.procurement.felicia.domain.model.User
 import com.procurement.felicia.infrastructure.kafka.KafkaAuthCredentials
 import com.procurement.felicia.infrastructure.kafka.createKafkaConsumer
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withTimeout
-import org.apache.kafka.clients.consumer.*
+import org.apache.kafka.clients.consumer.CommitFailedException
+import org.apache.kafka.clients.consumer.ConsumerRecord
+import org.apache.kafka.clients.consumer.ConsumerRecords
+import org.apache.kafka.clients.consumer.KafkaConsumer
+import org.apache.kafka.clients.consumer.OffsetAndMetadata
 import org.apache.kafka.common.TopicPartition
-import java.security.MessageDigest
 import java.time.Duration
-import java.time.LocalDateTime
 
 fun startListen(action: Action, topics: Set<String>, user: User, hosts: List<Socket>): Result<Client, KafkaError> {
 
@@ -34,11 +42,10 @@ fun startListen(action: Action, topics: Set<String>, user: User, hosts: List<Soc
 
 private fun assign(topics: Iterable<String>, consumerFactory: MessageConsumerFactory): Result<Client, ConsumerConflict> {
     val checkin = topics
-        .map { topic ->
+        .associate { topic ->
             val consumer = consumerFactory.create()
             checkin(topic, consumer).orForwardFail { error -> return error }
         }
-        .toMap()
 
     return success(Client(checkin))
 }
@@ -48,10 +55,10 @@ private fun reassign(topics: Iterable<String>, consumerFactory: MessageConsumerF
     val updatedTopics = (topics + oldTopics).toSet()
 
     val newSubscriptions = updatedTopics
-        .map { topic ->
+        .associate { topic ->
             val consumer = consumerFactory.create()
             checkin(topic, consumer).orForwardFail { error -> return error }
-        }.toMap()
+        }
 
     return client
         .apply { addSubscriptions(newSubscriptions) }
@@ -88,8 +95,7 @@ fun KafkaConsumer<*, *>.prepareAssignments(topic: String): List<TopicPartition> 
 
 fun KafkaConsumer<*, *>.getOffsets(assignments: List<TopicPartition>): Map<TopicPartition, OffsetAndMetadata> =
     assignments
-        .map { topicPartition -> topicPartition to OffsetAndMetadata(this.position(topicPartition)) }
-        .toMap()
+        .associate { topicPartition -> topicPartition to OffsetAndMetadata(this.position(topicPartition)) }
 
 suspend fun consume(timeout: Duration, consumer: KafkaConsumer<String, String>, content: String, topic: String): Option<String> =
     withTimeout(timeout.toMillis()) {
@@ -98,9 +104,7 @@ suspend fun consume(timeout: Duration, consumer: KafkaConsumer<String, String>, 
 
         while (isActive) {
             val records = consumer.poll(Duration.ofMillis(500))
-            println("await ${LocalDateTime.now()}, ${isActive}")
             if (!records.isEmpty) {
-                println("polled: ${records.count()}")
                 val searchResult = records.findFor(content)
                 when (searchResult) {
                     is Option.Some -> {
@@ -117,9 +121,7 @@ suspend fun consume(timeout: Duration, consumer: KafkaConsumer<String, String>, 
 
 fun ConsumerRecords<*, String>.findFor(content: String): Option<ConsumerRecord<*, String>> {
     this.forEach { record ->
-        println("${record.value()} | ${this}")
         if (record.value().contains(content)) {
-            println("record offset: ${record.offset()}")
             return Option.Some(record)
         }
     }
@@ -140,8 +142,7 @@ fun KafkaConsumer<*, String>.shiftOffsets(breakpoint: ConsumerRecord<*, String>)
         .filter { partitionInfo -> partitionInfo.partition() != breakpoint.partition() }
         .map { partitionInfo -> TopicPartition(partitionInfo.topic(), partitionInfo.partition()) }
 
-        .map { topicPartition -> topicPartition to breakpoint.timestamp() }
-        .toMap()
+        .associate { topicPartition -> topicPartition to breakpoint.timestamp() }
         .let { consumer.offsetsForTimes(it) }
         .filter { (_, offsetData) -> offsetData != null }
         .map { offsetData -> offsetData.key to OffsetAndMetadata(offsetData.value.offset() - 1) }
@@ -162,11 +163,4 @@ private fun KafkaConsumer<*, *>.tryCommit(offsets: Map<TopicPartition, OffsetAnd
     success(this.commitSync(offsets))
 } catch (exception: CommitFailedException) {
     failure(ConsumerConflict())
-}
-
-fun String.asSHA256(): String {
-    val bytes = this.toByteArray()
-    val md = MessageDigest.getInstance("SHA-256")
-    val digest = md.digest(bytes)
-    return digest.fold("", { str, it -> str + "%02x".format(it) })
 }
